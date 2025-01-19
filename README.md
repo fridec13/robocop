@@ -5,12 +5,12 @@
 ### Git 클론
 ```bash
 # 프론트엔드
-git clone https://github.com/your-username/robot-monitoring-frontend.git
-cd robot-monitoring-frontend
+git clone https://github.com/fridec/robocop.git
+cd frontend
 
 # 백엔드
-git clone https://github.com/your-username/robot-monitoring-backend.git
-cd robot-monitoring-backend
+git clone https://github.com/fridec/robocop.git
+cd backend
 ```
 
 ### 로컬 실행
