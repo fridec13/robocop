@@ -14,6 +14,11 @@ import websockets
 import fractions
 import socket
 import aiohttp_cors
+from pathlib import Path
+from app.config import VIDEO_STORAGE_PATH, FRAME_STORAGE_PATH
+from app.database import SessionLocal
+from app.models.video import Video
+import subprocess
 
 # ROS 클라이언트 설정
 ros_client = roslibpy.Ros(host='192.168.100.104', port=9090)
@@ -28,6 +33,10 @@ video_tracks = set()  # 활성화된 모든 video track을 저장
 # static 폴더가 없다면 생성
 if not os.path.exists('static'):
     os.makedirs('static')
+
+# 전역 변수 추가
+STORAGE_PATH = Path(FRAME_STORAGE_PATH)
+STORAGE_PATH.mkdir(parents=True, exist_ok=True)
 
 async def handle_index(request):
     """루트 경로 처리"""
@@ -181,16 +190,69 @@ def handle_image_message(message):
 class ROSVideoStreamTrack(VideoStreamTrack):
     def __init__(self):
         super().__init__()
-        self.latest_frame = None  # 최신 프레임 저장
-        self.frame_count = 0      # 처리된 총 프레임 수
-        self.stopped = False      # 트랙 중지 상태
-        self.pts_time = 0         # 프레임 타임스탬프
-        print("새로운 VideoTrack 생성됨")
-    
+        self.latest_frame = None
+        self.frame_count = 0
+        self.stopped = False
+        self.pts_time = 0
+        self.recording = True
+        self.current_session = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 저장 경로 설정
+        self.frame_dir = Path(FRAME_STORAGE_PATH) / self.current_session
+        self.frame_dir.mkdir(parents=True, exist_ok=True)
+        
+        # DB에 세션 기록
+        with SessionLocal() as db:
+            video_record = Video(
+                session_id=self.current_session,
+                file_path=str(Path(VIDEO_STORAGE_PATH) / f"{self.current_session}.mp4")
+            )
+            db.add(video_record)
+            db.commit()
+
     def stop(self):
+        if self.recording:
+            self.recording = False
+            self._convert_frames_to_video()
+            # DB 업데이트
+            with SessionLocal() as db:
+                video_record = db.query(Video).filter_by(session_id=self.current_session).first()
+                if video_record:
+                    video_record.end_time = datetime.utcnow()
+                    video_record.frame_count = self.frame_count
+                    video_record.status = "completed"
+                    db.commit()
         self.stopped = True
         super().stop()
-    
+
+    def _convert_frames_to_video(self):
+        """프레임들을 비디오로 변환"""
+        try:
+            output_path = Path(VIDEO_STORAGE_PATH) / f"{self.current_session}.mp4"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # ffmpeg 명령어로 프레임을 비디오로 변환
+            cmd = [
+                'ffmpeg',
+                '-framerate', '30',
+                '-i', f'{self.frame_dir}/frame_%06d.jpg',
+                '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',
+                str(output_path)
+            ]
+            subprocess.run(cmd, check=True)
+            
+            print(f"비디오 생성 완료: {output_path}")
+            
+        except Exception as e:
+            print(f"비디오 변환 에러: {e}")
+            # DB에 에러 상태 기록
+            with SessionLocal() as db:
+                video_record = db.query(Video).filter_by(session_id=self.current_session).first()
+                if video_record:
+                    video_record.status = "error"
+                    db.commit()
+
     def update_frame(self, image_data):
         if self.stopped:
             print("트랙이 중지됨")
@@ -227,6 +289,12 @@ class ROSVideoStreamTrack(VideoStreamTrack):
             self.latest_frame = video_frame
             self.frame_count += 1
             print(f"프레임 처리 완료 #{self.frame_count}")
+            
+            # 프레임 저장 로직 추가
+            if self.recording and self.current_session:
+                frame_filename = f"frame_{self.frame_count:06d}.jpg"
+                frame_path = self.frame_dir / frame_filename
+                cv2.imwrite(str(frame_path), frame)
             
         except Exception as e:
             print(f"프레임 처리 에러: {e}")
@@ -322,6 +390,56 @@ async def handle_offer(request):
             text=json.dumps({"error": str(e)})
         )
 
+# 녹화 제어를 위한 새로운 엔드포인트 추가
+async def handle_recording_control(request):
+    try:
+        params = await request.json()
+        action = params.get("action")
+        
+        if not video_tracks:
+            return web.Response(
+                status=400,
+                text="No active video tracks"
+            )
+            
+        track = next(iter(video_tracks))
+        
+        if action == "start":
+            session_id = track.start_recording()
+            return web.Response(
+                text=json.dumps({"status": "started", "session_id": session_id})
+            )
+        elif action == "stop":
+            session_id = track.stop_recording()
+            return web.Response(
+                text=json.dumps({"status": "stopped", "session_id": session_id})
+            )
+            
+    except Exception as e:
+        return web.Response(status=500, text=str(e))
+
+# 현재 세션 ID를 조회하는 엔드포인트 추가
+async def handle_current_session(request):
+    try:
+        if not video_tracks:
+            return web.Response(
+                status=400,
+                text=json.dumps({"error": "No active video tracks"})
+            )
+            
+        track = next(iter(video_tracks))
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({
+                "session_id": track.current_session
+            })
+        )
+    except Exception as e:
+        return web.Response(
+            status=500,
+            text=json.dumps({"error": str(e)})
+        )
+
 async def main():
     try:
         print("\n=== 서버 시작 ===")
@@ -352,6 +470,8 @@ async def main():
         cors.add(app.router.add_get('/', handle_index))
         cors.add(app.router.add_post('/offer', handle_offer))
         cors.add(app.router.add_get('/ws', handle_websocket))
+        cors.add(app.router.add_post('/recording', handle_recording_control))
+        cors.add(app.router.add_get('/recording/current-session', handle_current_session))
         
         # 정적 파일 설정
         app.router.add_static('/static', 'static')

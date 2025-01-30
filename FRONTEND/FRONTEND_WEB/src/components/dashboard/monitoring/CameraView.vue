@@ -26,12 +26,35 @@
         </div>
         <div ref="debug" class="debug-overlay" v-show="showDebug"></div>
       </div>
+      <div v-if="currentSession" class="recording-status">
+        녹화 중... (세션 ID: {{ currentSession }})
+      </div>
+    </div>
+
+    <div class="camera-controls">
+      <button 
+        :class="['record-button', isRecording ? 'recording' : '']"
+        @click="toggleRecording"
+      >
+        {{ isRecording ? '녹화 중지' : '녹화 시작' }}
+      </button>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
+
+const props = defineProps({
+  robotId: {
+    type: String,
+    required: true
+  },
+  rosHost: {
+    type: String,
+    default: '192.168.100.104'
+  }
+});
 
 const ws = ref(null);
 const videoElement = ref(null);
@@ -45,6 +68,8 @@ const video = ref(null);
 const debug = ref(null);
 const fps = ref(null);
 const showDebug = ref(false);
+const isRecording = ref(false);
+const currentSession = ref(null);
 let frameCount = 0;
 let lastTime = performance.now();
 
@@ -131,6 +156,7 @@ async function start() {
                 try {
                     videoElement.value.srcObject = event.streams[0];
                     cameraStatus.value = '스트리밍 중';
+                    fetchCurrentSession();
                     log('비디오 스트림 설정 완료');
                 } catch (error) {
                     log('비디오 스트림 설정 실패: ' + error.message);
@@ -153,14 +179,16 @@ async function start() {
     // 4. 서버에 offer 전송
     log('서버에 offer 전송 중...');
     const response = await fetch('http://localhost:8000/offer', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            sdp: pc.localDescription.sdp,
-            type: pc.localDescription.type
-        })
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        robot_id: props.robotId,
+        ros_host: props.rosHost,
+        sdp: pc.localDescription.sdp,
+        type: pc.localDescription.type
+      })
     });
     
     // 5. 응답 처리
@@ -192,6 +220,46 @@ start();
 const toggleDebug = () => {
   showDebug.value = !showDebug.value;
 };
+
+async function toggleRecording() {
+  try {
+    const action = isRecording.value ? 'stop' : 'start';
+    const response = await fetch('http://localhost:8000/recording', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ action })
+    });
+    
+    const result = await response.json();
+    
+    if (action === 'start') {
+      isRecording.value = true;
+      currentSession.value = result.session_id;
+    } else {
+      isRecording.value = false;
+      currentSession.value = null;
+    }
+    
+    log(`녹화 ${action}: ${result.session_id}`);
+  } catch (error) {
+    log('녹화 제어 에러: ' + error.message);
+  }
+}
+
+// 현재 세션 ID를 가져오는 함수 추가
+async function fetchCurrentSession() {
+    try {
+        const response = await fetch('http://localhost:8000/recording/current-session');
+        const result = await response.json();
+        if (result.session_id) {
+            currentSession.value = result.session_id;
+        }
+    } catch (error) {
+        log('세션 ID 조회 에러: ' + error.message);
+    }
+}
 
 onMounted(() => {
   if (videoElement.value) {
@@ -353,5 +421,45 @@ onMounted(() => {
 .loading {
   color: #fff;
   font-size: 1.1rem;
+}
+
+.camera-controls {
+  margin-top: 1rem;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.record-button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  background: #dc3545;
+  color: white;
+  font-weight: 500;
+}
+
+.record-button.recording {
+  background: #28a745;
+  animation: pulse 2s infinite;
+}
+
+.recording-status {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  background: rgba(220, 53, 69, 0.8);
+  color: white;
+  padding: 5px 10px;
+  border-radius: 5px;
+  font-size: 0.9rem;
+  z-index: 2;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.5; }
+  100% { opacity: 1; }
 }
 </style> 

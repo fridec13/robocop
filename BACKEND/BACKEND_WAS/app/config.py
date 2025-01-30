@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # 스토리지 설정
     STORAGE_PATH: str = os.getenv("STORAGE_PATH", "storage")
     
+    # 기존 설정에 추가
+    VIDEO_STORAGE_PATH = "storage/videos"
+    FRAME_STORAGE_PATH = "storage/video_frames"
+    
     class Config:
         env_file = ".env"
 
